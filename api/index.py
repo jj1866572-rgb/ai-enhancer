@@ -19,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# বিশ্বসেরা Real-ESRGAN Compact 4x3 মডেল (৪.৮ মেগাবাইট)
 MODEL_PATH = "/tmp/realesr_x4v3.onnx"
 MODEL_URL = "https://huggingface.co/CoderViking/realesr-general-x4v3-onnx/resolve/main/realesr-general-x4v3.onnx"
 session = None
@@ -38,7 +37,7 @@ def get_session():
 @app.get("/api")
 @app.get("/api/index.py")
 def health():
-    return {"status": "online", "model": "Real-ESRGAN AI Enhancer Ready"}
+    return {"status": "online", "model": "Real-ESRGAN AI Enhancer with Alpha Support Ready"}
 
 @app.post("/")
 @app.post("/api")
@@ -56,39 +55,53 @@ async def enhance_image(
 
     try:
         contents = await target.read()
-        img = Image.open(io.BytesIO(contents)).convert("RGB")
-        w, h = img.size
+        raw_img = Image.open(io.BytesIO(contents))
+        
+        has_alpha = raw_img.mode == "RGBA"
+        alpha_channel = None
+        
+        if has_alpha:
+            alpha_channel = raw_img.split()[3]
+            img = raw_img.convert("RGB")
+        else:
+            img = raw_img.convert("RGB")
 
-        # সার্ভারের গতি ও র্যামের সুরক্ষার জন্য অপটিমাল রিসাইজিং
+        w, h = img.size
         max_dim = 360
         if max(w, h) > max_dim:
             ratio = max_dim / float(max(w, h))
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
+            new_w, new_h = int(w * ratio), int(h * ratio)
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            if alpha_channel:
+                alpha_channel = alpha_channel.resize((new_w, new_h), Image.Resampling.LANCZOS)
             w, h = img.size
 
-        # রিয়েল-ESRGAN টেনসর তৈরি
         img_np = np.array(img).astype(np.float32) / 255.0
         img_np = np.transpose(img_np, (2, 0, 1))
         img_tensor = np.expand_dims(img_np, axis=0)
 
-        # ডিপ নিউরাল নেটওয়ার্ক এনহ্যান্সমেন্ট রান করা
         ort_sess = get_session()
         input_name = ort_sess.get_inputs()[0].name
         outputs = ort_sess.run(None, {input_name: img_tensor})
 
-        # আউটপুট ইমেজ রিকভারি
         out_tensor = outputs[0][0]
         out_tensor = np.clip(out_tensor, 0.0, 1.0)
         out_tensor = np.transpose(out_tensor, (1, 2, 0))
         enhanced_img = Image.fromarray((out_tensor * 255.0).astype(np.uint8), mode="RGB")
 
-        # ফেস এবং টেক্সচার আল্ট্রা-শার্প ফিল্টার
         enhancer = ImageEnhance.Sharpness(enhanced_img)
         enhanced_img = enhancer.enhance(1.4)
 
         out_io = io.BytesIO()
-        enhanced_img.save(out_io, format="JPEG", quality=95)
-        return Response(content=out_io.getvalue(), media_type="image/jpeg")
+        if has_alpha and alpha_channel:
+            # আলফা চ্যানেলও নিখুঁতভাবে ৪ গুণ স্কেল করে জোড়া লাগানো
+            alpha_resized = alpha_channel.resize(enhanced_img.size, Image.Resampling.LANCZOS)
+            enhanced_img.putalpha(alpha_resized)
+            enhanced_img.save(out_io, format="PNG")
+            return Response(content=out_io.getvalue(), media_type="image/png")
+        else:
+            enhanced_img.save(out_io, format="JPEG", quality=95)
+            return Response(content=out_io.getvalue(), media_type="image/jpeg")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
