@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-opencv-contrib-python-headless
+onnxruntime
 numpy
 pillow
 python-multipart
