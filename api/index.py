@@ -20,10 +20,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# আল্ট্রাফাস্ট FSRCNN 4x এআই মডেল
 MODEL_PATH = "/tmp/FSRCNN_x4.pb"
 MODEL_URL = "https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x4.pb"
-
 sr = None
 
 def get_sr_model():
@@ -34,67 +32,63 @@ def get_sr_model():
             with urllib.request.urlopen(req) as resp, open(MODEL_PATH, 'wb') as f:
                 f.write(resp.read())
         
-        # মডেল ইনিশিয়ালাইজ করা
         sr = dnn_superres.DnnSuperResImpl_create()
         sr.readModel(MODEL_PATH)
         sr.setModel("fsrcnn", 4)
     return sr
 
+# সব রকম রুট যেন Not Found না দেখিয়ে সার্ভার অনলাইন দেখায়
 @app.get("/")
 @app.get("/api")
+@app.get("/api/index.py")
 def health():
     return {"status": "online", "message": "AI Image Enhancer is Ready!"}
 
+# অ্যাপ থেকে আসা সমস্ত POST রিকোয়েস্ট নিশ্চিতভাবে গ্রহণ করা
 @app.post("/")
 @app.post("/api")
 @app.post("/enhance")
 @app.post("/api/enhance")
+@app.post("/api/index.py")
+@app.post("/api/index.py/enhance")
 async def enhance_image(
     image: Optional[UploadFile] = File(None),
     file: Optional[UploadFile] = File(None)
 ):
     target = image if image is not None else file
     if target is None:
-        raise HTTPException(status_code=400, detail="কোনো ছবি দেওয়া হয়নি!")
+        raise HTTPException(status_code=400, detail="No image provided")
 
     try:
         contents = await target.read()
         pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
         w, h = pil_img.size
         
-        # সার্ভারের গতি ঠিক রাখতে এবং ক্র্যাশ ঠেকাতে ইনপুট সাইজ লিমিট (৪০০ পিক্সেল)
-        # (৪০০ পিক্সেল ইনপুট হলে আউটপুট হবে ১৬০০x১৬০০ পিক্সেল HD ছবি)
-        max_dim = 400
+        # ৪ গুণ এনহ্যান্সের জন্য অপটিমাইজেশন (সর্বোচ্চ ৫০০ পিক্সেল)
+        max_dim = 500
         if max(w, h) > max_dim:
             ratio = max_dim / float(max(w, h))
             pil_img = pil_img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
             
-        # OpenCV ফরম্যাটে কনভার্ট (RGB থেকে BGR)
+        # OpenCV তে কনভার্ট ও ৪ গুণ সুপার-রেজোলিউশন রান
         cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        
-        # ৪ গুণ (4X) সুপার রেজোলিউশন এআই রান করা
         model = get_sr_model()
         result_cv = model.upsample(cv_img)
         
-        # আবার PIL ফরম্যাটে ফেরত আনা
+        # আবার PIL ইমেজে রূপান্তর
         result_pil = Image.fromarray(cv2.cvtColor(result_cv, cv2.COLOR_BGR2RGB))
         
-        # ==========================================
-        # স্পেশাল ফিনিশিং (HD ക്ലിയর ও কালার পপ)
-        # ==========================================
-        # ১. শার্পনেস (ঘোলা ভাব দূর করা)
+        # ছবির ডিটেইল ও শার্পনেস বাড়ানো
         enhancer_sharp = ImageEnhance.Sharpness(result_pil)
         result_pil = enhancer_sharp.enhance(1.8) 
         
-        # ২. কালার ও কন্ট্রাস্ট বুস্ট
         enhancer_color = ImageEnhance.Color(result_pil)
         result_pil = enhancer_color.enhance(1.15)
         
         enhancer_contrast = ImageEnhance.Contrast(result_pil)
         result_pil = enhancer_contrast.enhance(1.05)
-        # ==========================================
 
-        # রেজাল্ট JPEG হিসেবে রিটার্ন করা
+        # রেজাল্ট রিটার্ন করা
         out_io = io.BytesIO()
         result_pil.save(out_io, format="JPEG", quality=95)
         return Response(content=out_io.getvalue(), media_type="image/jpeg")
