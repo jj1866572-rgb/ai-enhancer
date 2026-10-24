@@ -6,11 +6,10 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
-import cv2
-from cv2 import dnn_superres
+import onnxruntime as ort
 from PIL import Image, ImageEnhance
 
-app = FastAPI(title="AI Image Enhancer API")
+app = FastAPI(title="Real-ESRGAN AI Enhancer")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,31 +19,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "/tmp/FSRCNN_x4.pb"
-MODEL_URL = "https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x4.pb"
-sr = None
+# বিশ্বসেরা Real-ESRGAN Compact 4x3 মডেল (৪.৮ মেগাবাইট)
+MODEL_PATH = "/tmp/realesr_x4v3.onnx"
+MODEL_URL = "https://huggingface.co/CoderViking/realesr-general-x4v3-onnx/resolve/main/realesr-general-x4v3.onnx"
+session = None
 
-def get_sr_model():
-    global sr
-    if sr is None:
+def get_session():
+    global session
+    if session is None:
         if not os.path.exists(MODEL_PATH):
             req = urllib.request.Request(MODEL_URL, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as resp, open(MODEL_PATH, 'wb') as f:
                 f.write(resp.read())
-        
-        sr = dnn_superres.DnnSuperResImpl_create()
-        sr.readModel(MODEL_PATH)
-        sr.setModel("fsrcnn", 4)
-    return sr
+        session = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+    return session
 
-# সব রকম রুট যেন Not Found না দেখিয়ে সার্ভার অনলাইন দেখায়
 @app.get("/")
 @app.get("/api")
 @app.get("/api/index.py")
 def health():
-    return {"status": "online", "message": "AI Image Enhancer is Ready!"}
+    return {"status": "online", "model": "Real-ESRGAN AI Enhancer Ready"}
 
-# অ্যাপ থেকে আসা সমস্ত POST রিকোয়েস্ট নিশ্চিতভাবে গ্রহণ করা
 @app.post("/")
 @app.post("/api")
 @app.post("/enhance")
@@ -61,36 +56,38 @@ async def enhance_image(
 
     try:
         contents = await target.read()
-        pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
-        w, h = pil_img.size
-        
-        # ৪ গুণ এনহ্যান্সের জন্য অপটিমাইজেশন (সর্বোচ্চ ৫০০ পিক্সেল)
-        max_dim = 500
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        w, h = img.size
+
+        # সার্ভারের গতি ও র্যামের সুরক্ষার জন্য অপটিমাল রিসাইজিং
+        max_dim = 360
         if max(w, h) > max_dim:
             ratio = max_dim / float(max(w, h))
-            pil_img = pil_img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
-            
-        # OpenCV তে কনভার্ট ও ৪ গুণ সুপার-রেজোলিউশন রান
-        cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        model = get_sr_model()
-        result_cv = model.upsample(cv_img)
-        
-        # আবার PIL ইমেজে রূপান্তর
-        result_pil = Image.fromarray(cv2.cvtColor(result_cv, cv2.COLOR_BGR2RGB))
-        
-        # ছবির ডিটেইল ও শার্পনেস বাড়ানো
-        enhancer_sharp = ImageEnhance.Sharpness(result_pil)
-        result_pil = enhancer_sharp.enhance(1.8) 
-        
-        enhancer_color = ImageEnhance.Color(result_pil)
-        result_pil = enhancer_color.enhance(1.15)
-        
-        enhancer_contrast = ImageEnhance.Contrast(result_pil)
-        result_pil = enhancer_contrast.enhance(1.05)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
+            w, h = img.size
 
-        # রেজাল্ট রিটার্ন করা
+        # রিয়েল-ESRGAN টেনসর তৈরি
+        img_np = np.array(img).astype(np.float32) / 255.0
+        img_np = np.transpose(img_np, (2, 0, 1))
+        img_tensor = np.expand_dims(img_np, axis=0)
+
+        # ডিপ নিউরাল নেটওয়ার্ক এনহ্যান্সমেন্ট রান করা
+        ort_sess = get_session()
+        input_name = ort_sess.get_inputs()[0].name
+        outputs = ort_sess.run(None, {input_name: img_tensor})
+
+        # আউটপুট ইমেজ রিকভারি
+        out_tensor = outputs[0][0]
+        out_tensor = np.clip(out_tensor, 0.0, 1.0)
+        out_tensor = np.transpose(out_tensor, (1, 2, 0))
+        enhanced_img = Image.fromarray((out_tensor * 255.0).astype(np.uint8), mode="RGB")
+
+        # ফেস এবং টেক্সচার আল্ট্রা-শার্প ফিল্টার
+        enhancer = ImageEnhance.Sharpness(enhanced_img)
+        enhanced_img = enhancer.enhance(1.4)
+
         out_io = io.BytesIO()
-        result_pil.save(out_io, format="JPEG", quality=95)
+        enhanced_img.save(out_io, format="JPEG", quality=95)
         return Response(content=out_io.getvalue(), media_type="image/jpeg")
 
     except Exception as e:
